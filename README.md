@@ -1,4 +1,5 @@
 # Nemilia AI v1.0
+<img width="2816" height="1504" alt="full_logo" src="https://github.com/user-attachments/assets/2c1ddfb8-0562-439b-b7ce-8dd55b1522f0" />
 
 **A browser-native AI workspace with multi-agent orchestration, human-in-the-loop review, semantic vector RAG, and visual workflow design — all running in a single HTML file with zero backend.**
 
