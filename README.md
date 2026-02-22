@@ -1,8 +1,10 @@
-# Nemilia AI v1.0
+# Nemilia AI v1.01
 
 **A browser-native AI workspace with multi-agent orchestration, human-in-the-loop review, semantic vector RAG, and visual workflow design — all in a single HTML file with zero backend.**
 
 *Nemilia (neh-mee-lee-ah) — Nahuatl for "to think, to remember, to imagine"*
+
+<img width="2816" height="1504" alt="full_logo" src="https://github.com/user-attachments/assets/1333cc6b-e9c0-4ae0-a903-75a0d4d66138" />
 
 ---
 
