@@ -808,7 +808,7 @@ Each agent's output is scored 1–10. Scores below 6 trigger automatic retries (
 ---
 
 ## Changelog
-### v1.6
+### v1.06
 - fixed webgpu issues
 - fixed ui issues
 - added newest providers
