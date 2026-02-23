@@ -1,4 +1,4 @@
-# Nemilia AI v1.01
+# Nemilia AI 
 
 **A browser-native AI workspace with multi-agent orchestration, human-in-the-loop review, semantic vector RAG, and visual workflow design — all in a single HTML file with zero backend.**
 
@@ -808,6 +808,10 @@ Each agent's output is scored 1–10. Scores below 6 trigger automatic retries (
 ---
 
 ## Changelog
+### v1.6
+- fixed webgpu issues
+- fixed ui issues
+- added newest providers
 
 ### v1.0 — Initial Release
 
