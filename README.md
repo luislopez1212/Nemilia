@@ -1,4 +1,5 @@
-# Nemilia AI v1.07
+# Nemilia AI Workspace v1.07 
+See [Nemilia.com](https://nemilia.com)
 
 **A browser-native AI workspace with multi-agent orchestration, human-in-the-loop review, semantic vector RAG, and visual workflow design — all in a single HTML file with zero backend.**
 
