@@ -167,7 +167,7 @@ Most AI tools require you to trust a platform with your data, pay for a subscrip
 | 🖥️ **Local Server** | Point at your running Ollama, Jan, or LM Studio instance | 100% on-device, any installed model |
 | 🔋 **Browser Offline** | Load Llama, Phi, Qwen, or Gemma via WebGPU — no key needed | Zero internet after first model download |
 
-All three options are free. Nemilia adapts to whatever setup you already have.
+Nemilia adapts to whatever setup you already have.
 
 ---
 
