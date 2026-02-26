@@ -1,7 +1,8 @@
-<div align="center">
-  <img src="https://nemilia.com/screenshots/full_logo.png" alt="Nemilia AI Workspace" width="340" />
 
-  <h1>Nemilia — AI Workspace</h1>
+<img width="2816" height="1504" alt="full_logo" src="https://github.com/user-attachments/assets/68b372c5-c328-45af-a216-fad90369c28a" />
+<div align="center">
+
+  <h1>Nemilia AI Workspace</h1>
 
   <p><strong>Your entire AI team. One file. Any provider.</strong></p>
 
