@@ -66,7 +66,7 @@
 
 ## What Is Nemilia?
 
-Nemilia AI is an entirely client-side AI platform packed into a single, self-contained HTML file. There is no server, no installer, no account to create, and no database to configure. You open one file in a browser and get a full multi-agent AI workspace.
+Nemilia AI Workspace is an entirely client-side AI platform packed into a single, self-contained HTML file. There is no server, no installer, no account to create, and no database to configure. You open one file in a browser and get a full multi-agent AI workspace.
 
 At its core, Nemilia lets you define **specialist AI agents** — each with a distinct role, personality, and system prompt — then wire them into **pipelines called workflows**. When you run a workflow, Nemilia orchestrates the agents in dependency order: a research agent gathers information, an analyst extracts insights, a writer produces content, a reviewer critiques it, and a synthesiser merges everything into a polished final report. Each agent's output is scored for quality and automatically retried if it falls short.
 
