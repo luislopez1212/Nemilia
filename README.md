@@ -1,7 +1,7 @@
 <div align="center">
 <img width="2816" height="1504" alt="full_logo" src="https://github.com/user-attachments/assets/1559238f-1e8e-4804-94e4-aa26ea51f8d3" />
 
-  <img src="https://nemilia.com/screenshots/full_logo.png" alt="Nemilia AI Workspace" width="340" />
+ 
 
   <h1>Nemilia — AI Workspace</h1>
 
