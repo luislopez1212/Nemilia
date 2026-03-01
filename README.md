@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://nemilia.com/screenshots/full_logo.png" alt="Nemilia AI Workspace" width="340" />
+<img width="2816" height="1504" alt="full_logo" src="https://github.com/user-attachments/assets/8c157476-ae35-4911-9c25-65a75ea0349a" />
 
   <h1>Nemilia — AI Workspace</h1>
 
