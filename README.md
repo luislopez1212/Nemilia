@@ -1,6 +1,5 @@
 <div align="center">
- <img width="2816" height="1504" alt="full_logo" src="https://github.com/user-attachments/assets/67c28885-cd9d-4bb1-8097-7462c75c6dd3" />
-
+  <img src="https://nemilia.com/screenshots/full_logo.png" alt="Nemilia AI Workspace" width="340" />
 
   <h1>Nemilia — AI Workspace</h1>
 
@@ -16,7 +15,7 @@
     <a href="mailto:luis@nemilia.com">luis@nemilia.com</a>
   </p>
 
-  <img src="https://img.shields.io/badge/version-1.18-gold" alt="version" />
+  <img src="https://img.shields.io/badge/version-1.20-gold" alt="version" />
   <img src="https://img.shields.io/badge/license-BSL_1.1-orange" alt="license" />
   <img src="https://img.shields.io/badge/backend-none-brightgreen" alt="no backend" />
   <img src="https://img.shields.io/badge/install-open%20HTML%20file-brightgreen" alt="install" />
@@ -25,7 +24,7 @@
 
 ---
 
-**A browser-native AI workspace with multi-agent orchestration, human-in-the-loop review, semantic vector RAG, and visual workflow design — all in a single HTML file with zero backend.**
+**A browser-native AI workspace with multi-agent orchestration, human-in-the-loop review, semantic vector RAG, reasoning model support, and visual workflow design — all in a single HTML file with zero backend.**
 
 *Nemilia (neh-mee-lee-ah) — Nahuatl for "to think, to remember, to imagine"*
 
@@ -432,6 +431,7 @@ When using the WebGPU provider, **absolutely nothing leaves your browser** after
 | **Ollama** | Any | [ollama.com](https://ollama.com) |
 | **LM Studio** | Any | [lmstudio.ai](https://lmstudio.ai) |
 | **Jan** | Any | [jan.ai](https://jan.ai) |
+| **Llamafile** | Any | [Mozilla Llamafile](https://github.com/Mozilla-Ocho/llamafile) |
 | **WebGPU** | Qwen 2.5 7B ⭐ | Built-in (Chrome 121+, Edge 121+, Safari 17+) |
 
 ---
@@ -842,6 +842,28 @@ Each agent's output is scored 1–10. Scores below 6 trigger automatic retries (
 
 ## Changelog
 
+### v1.20 — 2026-03-04
+
+**Bug Fixes & State Management**
+
+1. **SSE Parser `break outer` Fix** — The Server-Sent Events stream reader now correctly uses `break outer` when it encounters `data: [DONE]`, exiting the enclosing `while` loop rather than only the inner `for` loop. Previously this could produce a rare double-completion event on providers that send a trailing empty chunk after `[DONE]`.
+2. **`directConvoHistory` Promoted to Module Scope** — The direct-prompt follow-up conversation history was a local variable inside `openCompose()`, meaning `openCompose()` could never actually clear it between runs. Variable now lives at module level and is properly reset on navigation.
+3. **Double-Send Guard in Follow-Up Input** — Added an in-flight guard to the follow-up streaming path. Pressing Enter while a reply was streaming would fire a second overlapping API call; this no longer happens.
+4. **Chat `AbortError` History Poisoning Fix** — When a user clicked Stop during a chat stream, the partial/empty response was being pushed into `chatHistory`, which then corrupted the next message's context. Abort paths now skip history mutation entirely.
+5. **Auto-Route Neutral System Prompt** — The auto-workflow orchestrator call (agent selection phase) now uses a neutral system prompt rather than the user's custom AI persona. Custom personas with strong character instructions were causing structured JSON agent-selection output to fail parsing.
+6. **`renderCtxBar` and `buildShareLink` Defined** — Two functions called from UI event handlers (`ctx-modal` Done button and `share-modal` select `onchange`) were never defined in prior versions, causing silent JavaScript errors on every invocation. Both are now implemented.
+7. **Dead State Cleanup** — Removed stale module-level variables (`lastAR`, `lastSyn`, `lastCD`) that were written but never read, and a `MAX_CONTEXT_TOKENS` const that was always evaluated before `loadPrefs()` and therefore always stale.
+
+### v1.19 — 2026-03-03
+
+**Reasoning Model / Think Tag Support**
+
+1. **`processThinkTags()` Helper** — New function parses `<think>`, `<reasoning>`, and `<scratchpad>` XML blocks produced by reasoning models (DeepSeek R1, QwQ, Qwen 3, o1-style outputs). Accepts a `context` argument (`'chat'` or `'compose'`) so behaviour can be toggled independently per view.
+2. **Live Reasoning Badge — Chat** — While a reasoning model streams its `<think>` block, a pulsing amber **"💭 Thinking…"** badge appears inline in the chat bubble. The dot animates during streaming. Once the model transitions to its actual answer, the badge becomes a collapsible **"💭 Reasoning"** toggle that reveals the full thought process on click without cluttering the main response.
+3. **Live Reasoning Badge — Compose** — Identical badge system for the Compose direct-prompt view and workflow synthesis panel. A gold **"💭 Reasoning"** pill appears above the output body; clicking it expands a scrollable pre-formatted reasoning block.
+4. **Settings Toggles** — Two independent checkboxes added to Settings → Reasoning / Think Tags: one for Chat and one for Compose. When checked, raw `<think>` blocks are hidden from response text and shown as the collapsible badge. When unchecked, the model's raw reasoning appears inline in the output. Settings persist to `localStorage`.
+5. **Streaming-Safe** — The badge state is updated on every streaming chunk, so users see "Thinking…" the moment the reasoning block opens, and the transition to "Reasoning" (collapsed, done) happens the moment the first non-reasoning token arrives — with no layout shift.
+
 ### v1.18 — 2026-03-03
 
 **Context Safety, UX Polish & WebGPU Expansion**
@@ -920,11 +942,11 @@ Each agent's output is scored 1–10. Scores below 6 trigger automatic retries (
 
 **Business Source License 1.1 (BSL 1.1)**
 
-Nemilia AI v1.18 is source-available software, free for personal and non-commercial use.
+Nemilia AI v1.20 is source-available software, free for personal and non-commercial use.
 
 | Parameter | Value |
 |---|---|
-| Licensed Work | Nemilia AI v1.18 |
+| Licensed Work | Nemilia AI v1.20 |
 | Licensor | Luis Lopez / Nemilia AI |
 | Additional Use Grant | Personal use and internal non-commercial evaluation |
 | Change Date | 2030-02-27 |
