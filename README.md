@@ -29,6 +29,11 @@ Nemilia turns any browser into a complete AI production environment. Capture con
 
 *Nemilia (neh-mee-lee-ah) — Nahuatl for "to think, to remember, to imagine"*
 
+
+
+***NOTE 3/24/26 - Chrome Extension — now available on the Chrome Web Store → https://chromewebstore.google.com/detail/inkhagbajnhcnedmjhppgloeamfmhkfl
+Will be adding link in app with next release.
+
 ---
 
 ## Demo Videos
