@@ -140,7 +140,11 @@
             } else if (ev.data.type === 'API_STREAM_ERROR') {
               _swDone = true; clearInterval(_swPing); clearTimeout(_relayTimeout);
               window.removeEventListener('message', _h);
-              try { _ctrl.error(new Error(ev.data.error || 'relay error')); } catch (_) { }
+              try {
+                var _relayErr = new Error(ev.data.error || 'relay error');
+                _relayErr.status = ev.data.status || 0;
+                _ctrl.error(_relayErr);
+              } catch (_) { }
               _doneResolve(_buf || JSON.stringify({ error: { message: ev.data.error || 'relay error', status: ev.data.status || 500 } }));
             }
           }
@@ -11566,7 +11570,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       const banner = document.getElementById('ws-reconnect-banner');
       if (banner) { banner.classList.add('hidden'); banner._storedHandle = null; }
     }
-    async function ensureSubDirs() { if (!dirHandle) return; for (const n of ['prompts', 'agents', 'workflows', 'docs', 'results']) subDirs[n] = await dirHandle.getDirectoryHandle(n, { create: true }); }
+    async function ensureSubDirs() { if (!dirHandle) return; for (const n of ['prompts', 'agents', 'workflows', 'docs', 'results', 'cache']) subDirs[n] = await dirHandle.getDirectoryHandle(n, { create: true }); }
 
     // Retroactive sync: write any existing Library docs to folder that aren't there yet.
     // Called once after a new folder is set up. Silent if nothing to sync.
@@ -13013,7 +13017,368 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       return name + ': ' + (rawMsg || 'Unknown error — check your API key and provider settings.');
     }
 
+    const NEM_LLM_RETRY_MAX_ATTEMPTS = 10;
+
+    function getLlmRetryMaxAttempts() {
+      return NEM_LLM_RETRY_MAX_ATTEMPTS;
+    }
+
+    function nemLlmRetryDelayMs(nextAttempt) {
+      const delays = [2000, 4000, 8000, 16000, 30000, 45000, 60000, 60000, 60000];
+      const idx = Math.max(0, Math.min(delays.length - 1, (parseInt(nextAttempt, 10) || 2) - 2));
+      return delays[idx];
+    }
+
+    function nemLlmErrorStatus(err) {
+      const raw = err?.status ?? err?.statusCode ?? err?.response?.status ?? 0;
+      const n = parseInt(raw, 10);
+      return Number.isFinite(n) ? n : 0;
+    }
+
+    function isRetryableLlmError(err) {
+      if (!err || err.name === 'AbortError') return false;
+      const status = nemLlmErrorStatus(err);
+      if ([408, 409, 425, 429, 500, 502, 503, 504].includes(status)) return true;
+      if ([400, 401, 402, 403, 404, 410, 413].includes(status)) return false;
+
+      const msg = String(err.message || err || '').toLowerCase();
+      if (!msg) return false;
+      if (msg.includes('invalid or missing api key') || msg.includes('api key not found') || msg.includes('unauthorized')) return false;
+      if (msg.includes('access denied') || msg.includes('forbidden') || msg.includes('billing') || msg.includes('payment')) return false;
+      if (msg.includes('deprecated') || msg.includes('model not found') || msg.includes('context window') || msg.includes('context length')) return false;
+      if (msg.includes('cors policy') || msg.includes('extension is required') || msg.includes('cannot connect')) return false;
+
+      return msg.includes('rate limit')
+        || msg.includes('too many requests')
+        || msg.includes('quota')
+        || msg.includes('temporarily down')
+        || msg.includes('overloaded')
+        || msg.includes('service unavailable')
+        || msg.includes('bad gateway')
+        || msg.includes('timeout')
+        || msg.includes('timed out')
+        || msg.includes('stalled')
+        || msg.includes('empty response from provider')
+        || msg.includes('network error')
+        || msg.includes('networkerror')
+        || msg.includes('failed to fetch')
+        || msg.includes('fetch failed')
+        || msg.includes('tls handshake')
+        || msg.includes('handshake eof')
+        || msg.includes('client error (connect)')
+        || msg.includes('connection reset')
+        || msg.includes('connection closed')
+        || msg.includes('connection refused')
+        || msg.includes('socket hang up')
+        || msg.includes('econnreset')
+        || msg.includes('etimedout')
+        || msg.includes('server_error')
+        || msg.includes('codex_api_error');
+    }
+
+    async function withLlmFailureRetries(operation, opts) {
+      opts = opts || {};
+      const maxAttempts = Math.min(getLlmRetryMaxAttempts(), Math.max(1, parseInt(opts.maxAttempts || getLlmRetryMaxAttempts(), 10) || getLlmRetryMaxAttempts()));
+      const delayMs = opts.delayMs || nemLlmRetryDelayMs;
+      const sleepFn = opts.sleepFn || sleep;
+      let lastErr = null;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          return await operation(attempt, maxAttempts);
+        } catch (err) {
+          lastErr = err;
+          if (attempt >= maxAttempts || !isRetryableLlmError(err)) throw err;
+          const nextAttempt = attempt + 1;
+          const delay = Math.max(0, delayMs(nextAttempt, err) || 0);
+          if (opts.onRetry) opts.onRetry(err, nextAttempt, maxAttempts, delay);
+          await sleepFn(delay, err, nextAttempt, maxAttempts);
+          if (opts.signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+        }
+      }
+      throw lastErr || new Error('LLM call failed');
+    }
+
+    function nemExtractTextParts(parts) {
+      if (!Array.isArray(parts)) return '';
+      return parts.map(function (part) {
+        if (!part) return '';
+        if (typeof part === 'string') return part;
+        if (typeof part.text === 'string') return part.text;
+        if (typeof part.content === 'string') return part.content;
+        return '';
+      }).join('');
+    }
+
+    function nemExtractProviderTextFromJson(d) {
+      if (!d || typeof d !== 'object') return '';
+      if (typeof d.output_text === 'string') return d.output_text;
+      if (typeof d.response === 'string') return d.response;
+      if (typeof d.text === 'string') return d.text;
+      if (typeof d.content === 'string') return d.content;
+      const choice = Array.isArray(d.choices) ? d.choices[0] : null;
+      if (choice) {
+        if (typeof choice.text === 'string') return choice.text;
+        if (typeof choice.message?.content === 'string') return choice.message.content;
+        if (Array.isArray(choice.message?.content)) return nemExtractTextParts(choice.message.content);
+        if (typeof choice.delta?.content === 'string') return choice.delta.content;
+      }
+      if (d.message) {
+        if (typeof d.message.content === 'string') return d.message.content;
+        if (Array.isArray(d.message.content)) return nemExtractTextParts(d.message.content);
+      }
+      if (d.response && typeof d.response === 'object') {
+        const nested = nemExtractProviderTextFromJson(d.response);
+        if (nested) return nested;
+      }
+      if (Array.isArray(d.output)) {
+        return d.output.map(function (item) {
+          if (!item) return '';
+          if (typeof item.text === 'string') return item.text;
+          if (typeof item.content === 'string') return item.content;
+          if (Array.isArray(item.content)) return nemExtractTextParts(item.content);
+          return nemExtractProviderTextFromJson(item);
+        }).join('');
+      }
+      if (Array.isArray(d.content)) return nemExtractTextParts(d.content);
+      return '';
+    }
+
+    function nemExtractProviderTextFromRaw(raw) {
+      const txt = String(raw || '').trim();
+      if (!txt || txt.startsWith('data:')) return '';
+      try { return nemExtractProviderTextFromJson(JSON.parse(txt)); } catch (_) { return ''; }
+    }
+
+    function nemBuildResponsesInputContent(content) {
+      if (Array.isArray(content)) {
+        return content.map(function (c) {
+          if (!c) return { type: 'input_text', text: '' };
+          if (typeof c === 'string') return { type: 'input_text', text: c };
+          if (c.type === 'image_url') return { type: 'input_image', image_url: c.image_url?.url || c.image_url || '' };
+          if (c.type === 'image') return { type: 'input_image', image_url: c.image_url || c.url || '' };
+          if (c.type === 'input_image' || c.type === 'input_text') return c;
+          return { type: 'input_text', text: c.text || c.content || '' };
+        });
+      }
+      return [{ type: 'input_text', text: String(content || '') }];
+    }
+
+    function nemProviderErrorMessageFromJson(d) {
+      if (!d || typeof d !== 'object') return '';
+      if (d.error) {
+        if (typeof d.error === 'string') return d.error;
+        if (typeof d.error.message === 'string') return d.error.message;
+        if (typeof d.error.detail === 'string') return d.error.detail;
+      }
+      if (d.type === 'error' && typeof d.message === 'string') return d.message;
+      if (typeof d.message === 'string' && (d.status || d.status_code || d.code)) return d.message;
+      return '';
+    }
+
+    function nemExtractResponsesEventDelta(d, full) {
+      if (!d || typeof d !== 'object') return '';
+      if (d.type === 'response.output_text.delta') return d.delta || '';
+      if (d.type === 'response.output_text.done') {
+        const text = d.text || '';
+        return text && text.length > (full || '').length ? text.slice((full || '').length) : '';
+      }
+      if (d.type === 'response.completed') {
+        const completedText = nemExtractProviderTextFromJson(d.response || d);
+        return completedText && completedText.length > (full || '').length ? completedText.slice((full || '').length) : '';
+      }
+      if (d.type === 'response.output_item.done' || d.type === 'response.content_part.done') {
+        const doneText = nemExtractProviderTextFromJson(d.item || d.part || d);
+        return doneText && doneText.length > (full || '').length ? doneText.slice((full || '').length) : '';
+      }
+      return typeof d.delta === 'string' ? d.delta : '';
+    }
+
+    function nemHasUsefulLlmText(text) {
+      const clean = String(text || '')
+        .replace(/<think>[\s\S]*?<\/think>/gi, '')
+        .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
+        .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
+        .trim();
+      return clean.length > 0;
+    }
+
+    const NEM_LLM_FILE_CACHE_DIR = 'cache';
+    const NEM_LLM_FILE_CACHE_SCHEMA = 1;
+
+    function nemStableStringify(value) {
+      const seen = new WeakSet();
+      const normalize = function (v) {
+        if (v === undefined || typeof v === 'function' || typeof v === 'symbol') return null;
+        if (v === null || typeof v !== 'object') {
+          return Number.isFinite(v) || typeof v !== 'number' ? v : null;
+        }
+        if (seen.has(v)) throw new Error('Cannot cache circular request info');
+        seen.add(v);
+        let out;
+        if (Array.isArray(v)) {
+          out = v.map(normalize);
+        } else {
+          out = {};
+          Object.keys(v).sort().forEach(function (k) { out[k] = normalize(v[k]); });
+        }
+        seen.delete(v);
+        return out;
+      };
+      return JSON.stringify(normalize(value));
+    }
+
+    function nemMd5(input) {
+      const bytes = new TextEncoder().encode(String(input || ''));
+      const blockLen = (((bytes.length + 9 + 63) >> 6) << 6);
+      const data = new Uint8Array(blockLen);
+      data.set(bytes);
+      data[bytes.length] = 0x80;
+      const bitLen = bytes.length * 8;
+      const low = bitLen >>> 0;
+      const high = Math.floor(bitLen / 0x100000000) >>> 0;
+      for (let i = 0; i < 4; i++) {
+        data[blockLen - 8 + i] = (low >>> (8 * i)) & 255;
+        data[blockLen - 4 + i] = (high >>> (8 * i)) & 255;
+      }
+      const shifts = [7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21];
+      const table = [];
+      for (let i = 0; i < 64; i++) table[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 0x100000000) >>> 0;
+      let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+      const rotl = function (x, c) { return (x << c) | (x >>> (32 - c)); };
+      for (let offset = 0; offset < data.length; offset += 64) {
+        const m = new Array(16);
+        for (let i = 0; i < 16; i++) {
+          const j = offset + i * 4;
+          m[i] = (data[j] | (data[j + 1] << 8) | (data[j + 2] << 16) | (data[j + 3] << 24)) >>> 0;
+        }
+        let a = a0, b = b0, c = c0, d = d0;
+        for (let i = 0; i < 64; i++) {
+          let f, g;
+          if (i < 16) { f = (b & c) | (~b & d); g = i; }
+          else if (i < 32) { f = (d & b) | (~d & c); g = (5 * i + 1) % 16; }
+          else if (i < 48) { f = b ^ c ^ d; g = (3 * i + 5) % 16; }
+          else { f = c ^ (b | ~d); g = (7 * i) % 16; }
+          const tmp = d;
+          d = c;
+          c = b;
+          b = (b + rotl((a + f + table[i] + m[g]) >>> 0, shifts[i])) >>> 0;
+          a = tmp;
+        }
+        a0 = (a0 + a) >>> 0;
+        b0 = (b0 + b) >>> 0;
+        c0 = (c0 + c) >>> 0;
+        d0 = (d0 + d) >>> 0;
+      }
+      const hexWord = function (n) {
+        let s = '';
+        for (let i = 0; i < 4; i++) s += ((n >>> (8 * i)) & 255).toString(16).padStart(2, '0');
+        return s;
+      };
+      return hexWord(a0) + hexWord(b0) + hexWord(c0) + hexWord(d0);
+    }
+
+    function nemBuildLlmCacheRequestInfo(meta) {
+      let parsedBody = meta?.body || '';
+      try { parsedBody = JSON.parse(parsedBody); } catch (_) { parsedBody = String(parsedBody || ''); }
+      return {
+        schema: NEM_LLM_FILE_CACHE_SCHEMA,
+        type: 'llm-provider-request',
+        provider: meta?.pid || '',
+        model: meta?.model || '',
+        endpoint: meta?.url || '',
+        format: meta?.fmt || '',
+        responsesApi: !!meta?.isResponsesApi,
+        body: parsedBody
+      };
+    }
+
+    function nemBuildLlmCacheKey(requestInfo) {
+      return nemMd5(nemStableStringify(requestInfo));
+    }
+
+    function nemLlmCacheFilename(key) {
+      if (!/^[a-f0-9]{32}$/.test(String(key || ''))) throw new Error('Invalid LLM cache key');
+      return key + '.json';
+    }
+
+    async function nemGetLlmCacheDir(create) {
+      if (!dirHandle || !dirHandle.getDirectoryHandle) return null;
+      try {
+        const cacheDir = await dirHandle.getDirectoryHandle(NEM_LLM_FILE_CACHE_DIR, { create: !!create });
+        try { if (subDirs) subDirs[NEM_LLM_FILE_CACHE_DIR] = cacheDir; } catch (_) { }
+        return cacheDir;
+      } catch (e) {
+        try { debugLog('[Nemilia] LLM cache directory unavailable:', e.message || e); } catch (_) { }
+        return null;
+      }
+    }
+
+    async function nemReadLlmFileCache(key) {
+      try {
+        const cacheDir = await nemGetLlmCacheDir(false);
+        if (!cacheDir) return null;
+        const fh = await cacheDir.getFileHandle(nemLlmCacheFilename(key), { create: false });
+        const raw = await (await fh.getFile()).text();
+        const entry = JSON.parse(raw);
+        if (!entry || entry.schema !== NEM_LLM_FILE_CACHE_SCHEMA || entry.key !== key || typeof entry.content !== 'string') return null;
+        return entry.content;
+      } catch (_) { return null; }
+    }
+
+    async function nemWriteLlmFileCache(key, requestInfo, content) {
+      if (typeof content !== 'string' || !nemHasUsefulLlmText(content)) return false;
+      try {
+        const cacheDir = await nemGetLlmCacheDir(true);
+        if (!cacheDir) return false;
+        const payload = {
+          schema: NEM_LLM_FILE_CACHE_SCHEMA,
+          key,
+          cachedAt: new Date().toISOString(),
+          provider: requestInfo?.provider || '',
+          model: requestInfo?.model || '',
+          endpoint: requestInfo?.endpoint || '',
+          format: requestInfo?.format || '',
+          content
+        };
+        await fsWriteFile(cacheDir, nemLlmCacheFilename(key), JSON.stringify(payload, null, 2));
+        return true;
+      } catch (e) {
+        try { debugLog('[Nemilia] LLM cache write skipped:', e.message || e); } catch (_) { }
+        return false;
+      }
+    }
+
+    async function nemReadOrRunLlmFileCache(requestInfo, onChunk, runProvider) {
+      const key = nemBuildLlmCacheKey(requestInfo);
+      const cached = await nemReadLlmFileCache(key);
+      if (cached !== null) {
+        try { debugLog('[Nemilia] LLM cache hit:', key); } catch (_) { }
+        if (onChunk) onChunk(cached, cached);
+        return cached;
+      }
+      const result = await runProvider();
+      if (typeof result === 'string' && nemHasUsefulLlmText(result)) {
+        await nemWriteLlmFileCache(key, requestInfo, result);
+      }
+      return result;
+    }
+
     async function streamAPI(messages, sysPrompt, onChunk, signal, modelOverride, maxTokensOverride, tempOverride, toolsOverride) {
+      return withLlmFailureRetries(
+        () => streamAPIOnce(messages, sysPrompt, onChunk, signal, modelOverride, maxTokensOverride, tempOverride, toolsOverride),
+        {
+          signal,
+          onRetry: function (err, nextAttempt, maxAttempts, delay) {
+            const secs = Math.max(1, Math.ceil(delay / 1000));
+            const msg = 'LLM call failed — retrying ' + nextAttempt + '/' + maxAttempts + ' in ' + secs + 's';
+            try { debugLog('[Nemilia] ' + msg + ': ' + (err.message || err)); } catch (_) { }
+            try { notify(msg, 'info', Math.min(5000, delay + 500)); } catch (_) { }
+          }
+        }
+      );
+    }
+
+    async function streamAPIOnce(messages, sysPrompt, onChunk, signal, modelOverride, maxTokensOverride, tempOverride, toolsOverride) {
       try { nemSetBusy(true); } catch (_) { }
       try {
         const pid = WS.prov.id, cfg = PROV[pid];
@@ -13063,7 +13428,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
         if (!cfg.noKey) {
           apiKey = await getKey(pid);
           // FIX v1.30: custom provider key is optional — only throw if non-custom provider has no key
-          if (!apiKey && pid !== 'custom') throw new Error(friendlyError(pid, 401, 'API key not found'));
+          if (!apiKey && pid !== 'custom') { const err = new Error(friendlyError(pid, 401, 'API key not found')); err.status = 401; throw err; }
         }
         const model = modelOverride || WS.prov.modelId;
         // FIX v1.24: cap at real provider output limit — prevents 400s on Groq/OpenAI/etc
@@ -13107,6 +13472,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
         const _perfPromptChars = (sysPrompt || '').length + messages.reduce((s, m) => s + ((m && m.content) || '').length, 0);
         let _perfMeasured = false;
         let url = cfg.ep.replace('{MODEL}', model);
+        const _isResponsesApi = pid === 'custom' && /\/responses?\/?$/i.test(url);
         const headers = { 'Content-Type': 'application/json' };
         if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
         if (cfg.extra) Object.assign(headers, cfg.extra);
@@ -13158,19 +13524,22 @@ https://github.com/nodeca/pako/blob/main/LICENSE
           const gemCfg = { contents: gemContents, generationConfig: { maxOutputTokens: maxTok > 0 ? maxTok : 8192, temperature: _temp } };
           if (sysPrompt) gemCfg.systemInstruction = { parts: [{ text: sysPrompt }] };
           body = JSON.stringify(gemCfg);
-          const r = await fetchWithRetry429(url, { method: 'POST', headers, body }, signal);
-          if (!r.ok) { const e = await r.text(); throw new Error(friendlyError('gemini', r.status, e)); }
-          const d = await r.json();
-          let txt = d.candidates?.[0]?.content?.parts?.[0]?.text || '';
-          // v2.2: Apply reasoning sanitizer to Gemini path
-          txt = _nemSanitizeReasoning(txt);
-          // v2.2: record prefill latency for non-streaming Gemini
-          try {
-            const _toks = Math.ceil(_perfPromptChars / _charsPerTok());
-            _perfUpdate(pid, model, { promptChars: _perfPromptChars, promptTokens: _toks, prefillMs: Date.now() - _perfSendTs });
-          } catch (_) { }
-          if (onChunk) onChunk(txt, txt);
-          return txt;
+          const _gemCacheInfo = nemBuildLlmCacheRequestInfo({ pid, model, url, fmt: cfg.fmt, isResponsesApi: _isResponsesApi, body });
+          return await nemReadOrRunLlmFileCache(_gemCacheInfo, onChunk, async function () {
+            const r = await fetchProviderOnce(url, { method: 'POST', headers, body }, signal);
+            if (!r.ok) { const e = await r.text(); const err = new Error(friendlyError('gemini', r.status, e)); err.status = r.status; throw err; }
+            const d = await r.json();
+            let txt = d.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            // v2.2: Apply reasoning sanitizer to Gemini path
+            txt = _nemSanitizeReasoning(txt);
+            // v2.2: record prefill latency for non-streaming Gemini
+            try {
+              const _toks = Math.ceil(_perfPromptChars / _charsPerTok());
+              _perfUpdate(pid, model, { promptChars: _perfPromptChars, promptTokens: _toks, prefillMs: Date.now() - _perfSendTs });
+            } catch (_) { }
+            if (onChunk) onChunk(txt, txt);
+            return txt;
+          });
         } else if (cfg.fmt === 'anthropic') {
           headers['x-api-key'] = apiKey;
           headers['anthropic-version'] = '2023-06-01';
@@ -13181,14 +13550,37 @@ https://github.com/nodeca/pako/blob/main/LICENSE
           // with the same system prompt (workflow agents, chat sessions) reuse cached input tokens
           const _antSys = sysPrompt ? [{ type: 'text', text: sysPrompt, cache_control: { type: 'ephemeral' } }] : [];
           body = JSON.stringify({ model, max_tokens: maxTok, system: _antSys, messages: _safeMessages, temperature: _temp, stream: true, ...(_safeTools?.length && { tools: _safeTools }) });
+        } else if (_isResponsesApi) {
+          const _respInput = _safeMessages.map(function (m) {
+            const role = m.role === 'system' ? 'developer' : (m.role || 'user');
+            return { role, content: nemBuildResponsesInputContent(m.content) };
+          });
+          const _respBodyObj = {
+            model,
+            input: _respInput,
+            ...(sysPrompt && { instructions: sysPrompt }),
+            ...(maxTok !== -1 && { max_output_tokens: maxTok }),
+            temperature: _temp,
+            stream: true,
+            ...(_safeTools?.length && { tools: _safeTools })
+          };
+          body = JSON.stringify(_respBodyObj);
         } else {
           const _bodyObj = { model, messages: sysPrompt ? [{ role: 'system', content: sysPrompt }, ..._safeMessages] : _safeMessages, ...(maxTok !== -1 && { max_tokens: maxTok }), temperature: _temp, stream: true, stream_options: { include_usage: true }, ...(_safeTools?.length && { tools: _safeTools, tool_choice: 'auto' }) };
           body = JSON.stringify(_bodyObj);
         }
-        const r = await fetchWithRetry429(url, { method: 'POST', headers, body }, signal);
-        if (!r.ok) { const e = await r.text(); throw new Error(friendlyError(pid, r.status, e)); }
+        const _llmCacheInfo = nemBuildLlmCacheRequestInfo({ pid, model, url, fmt: cfg.fmt, isResponsesApi: _isResponsesApi, body });
+        const _llmCacheKey = nemBuildLlmCacheKey(_llmCacheInfo);
+        const _llmCached = await nemReadLlmFileCache(_llmCacheKey);
+        if (_llmCached !== null) {
+          try { debugLog('[Nemilia] LLM cache hit:', _llmCacheKey); } catch (_) { }
+          if (onChunk) onChunk(_llmCached, _llmCached);
+          return _llmCached;
+        }
+        const r = await fetchProviderOnce(url, { method: 'POST', headers, body }, signal);
+        if (!r.ok) { const e = await r.text(); const err = new Error(friendlyError(pid, r.status, e)); err.status = r.status; throw err; }
         const reader = r.body.getReader(), dec = new TextDecoder();
-        let full = '', buf = '';
+        let full = '', buf = '', rawStreamText = '', _streamHadParseError = false;
         let _toolCallsAccum = [];
         // SEC-FIX P2-01: per-chunk inactivity timeout — prevents indefinite hang on half-open connections
         const _inactivityMs = ['ollama', 'lmstudio', 'jan', 'llamafile', 'webgpu'].includes(pid) ? 300000 : 120000;
@@ -13199,7 +13591,9 @@ https://github.com/nodeca/pako/blob/main/LICENSE
           try { _readResult = await Promise.race([reader.read(), _inactivityP]); } catch (e) { try { reader.cancel(); } catch (_) { } throw e; } finally { clearTimeout(_inactivityTimer); }
           const { done, value } = _readResult;
           if (done) break;
-          buf += dec.decode(value, { stream: true });
+          const chunkText = dec.decode(value, { stream: true });
+          rawStreamText += chunkText;
+          buf += chunkText;
           const lines = buf.split('\n'); buf = lines.pop();
           for (const line of lines) {
             const l = line.trim();
@@ -13208,6 +13602,13 @@ https://github.com/nodeca/pako/blob/main/LICENSE
             if (!l.startsWith('data: ')) continue;
             try {
               const d = JSON.parse(l.slice(6));
+              const _providerErr = nemProviderErrorMessageFromJson(d);
+              if (_providerErr) {
+                const err = new Error(friendlyError(pid, d.status || d.status_code || 0, _providerErr));
+                err.status = d.status || d.status_code || 0;
+                err._nemProviderError = true;
+                throw err;
+              }
               // FIX v2.1: OpenRouter thinking models (qwen3, DeepSeek-R1, etc.) stream their reasoning
               // in d.choices[0].delta.reasoning_content with d.choices[0].delta.content empty/null
               // during the thinking phase. Wrap reasoning fragments in <think> tags so the existing
@@ -13223,6 +13624,14 @@ https://github.com/nodeca/pako/blob/main/LICENSE
                   }
                 }
                 delta = d.delta?.text || '';
+              } else if (_isResponsesApi) {
+                if (d.usage && onChunk) {
+                  const _pTok = d.usage.input_tokens || 0;
+                  const _cTok = d.usage.output_tokens || 0;
+                  const _tTok = d.usage.total_tokens || (_pTok + _cTok);
+                  if (_tTok > 0) onChunk(null, null, null, _tTok);
+                }
+                delta = nemExtractResponsesEventDelta(d, full);
               } else {
                 if (d.usage && onChunk) {
                   const _pTok = d.usage.prompt_tokens || 0;
@@ -13276,14 +13685,31 @@ https://github.com/nodeca/pako/blob/main/LICENSE
               }
 
             } catch (e) {
+              if (e && e._nemProviderError) throw e;
               // Stream error fallback — log raw chunk for debugging
               // FIX P2-05: surface stream parse errors to the user
+              _streamHadParseError = true;
               console.error('[Nemilia] stream parse error:', l.slice(0, 200), e.message);
               notify('Stream parse error — response may be incomplete', 'warn', 3000);
             }
           }
         }
+        if (!full) {
+          let fallback = nemExtractProviderTextFromRaw(rawStreamText);
+          if (fallback) {
+            fallback = _nemSanitizeReasoning(fallback);
+            try {
+              const _toks = Math.ceil(_perfPromptChars / _charsPerTok());
+              _perfUpdate(pid, model, { promptChars: _perfPromptChars, promptTokens: _toks, prefillMs: Date.now() - _perfSendTs });
+            } catch (_) { }
+            if (onChunk) onChunk(fallback, fallback);
+            if (!_streamHadParseError) await nemWriteLlmFileCache(_llmCacheKey, _llmCacheInfo, fallback);
+            return fallback;
+          }
+          throw Object.assign(new Error('Empty response from provider'), { status: 0 });
+        }
         // FIX v1.21: return raw — display layer (processThinkTags / stripThinkingTags) handles all <think> cleanup
+        if (!_streamHadParseError) await nemWriteLlmFileCache(_llmCacheKey, _llmCacheInfo, full);
         return full;
       } finally { try { nemSetBusy(false); } catch (_) { } }
     }
@@ -16742,7 +17168,7 @@ Rules: Use ONLY \`\`\`chart, \`\`\`svg, or \`\`\`html — never \`\`\`json or \`
               try {
                 _lastChunk = Date.now(); // reset again right before streamAPI
                 let _sHeur = 0;
-                await streamAPI([{ role: 'user', content: userMsg }], sysp, (delta, full, tc, usageTok) => {
+                const _agentStreamRet = await streamAPI([{ role: 'user', content: userMsg }], sysp, (delta, full, tc, usageTok) => {
                   if (usageTok) { updateStats(usageTok - _sHeur); _sHeur = usageTok; }
                   else if (delta) {
                     result = full;
@@ -16755,13 +17181,15 @@ Rules: Use ONLY \`\`\`chart, \`\`\`svg, or \`\`\`html — never \`\`\`json or \`
                     fill.style.width = pct + '%';
                   }
                 }, runAbort?.signal, agent.modelOverride || null, _agentMaxTok, _agentTemp);
+                if (_agentStreamRet) result = _agentStreamRet;
                 clearInterval(_watchdog);
               } catch (e) {
                 clearInterval(_watchdog); // v2.0: always clear watchdog
                 if (e.name === 'AbortError') return;
                 // v2.0: detect fatal auth/payment errors — abort entire run
                 const _fatalCodes = ['401', '402', '403', '413'];
-                const _isFatal = _fatalCodes.some(c => e.message?.includes(c));
+                const _fatalStatuses = [401, 402, 403, 413];
+                const _isFatal = _fatalStatuses.includes(nemLlmErrorStatus(e)) || _fatalCodes.some(c => e.message?.includes(c));
                 if (_isFatal && runAbort) { log('err', `Fatal API error — aborting run: ${e.message.slice(0, 120)}`); runAbort.abort(); }
                 cardEl.className = 'acard error';
                 document.getElementById('ast-' + agent.id).textContent = 'Error';
@@ -16769,6 +17197,20 @@ Rules: Use ONLY \`\`\`chart, \`\`\`svg, or \`\`\`html — never \`\`\`json or \`
                 log('err', `${agent.name}: ${e.message}`);
                 agentResults[agent.name] = '[Error: ' + e.message + ']';
                 agentScores[agent.name] = { score: 0, note: e.message, passed: false };
+                doneCount++;
+                document.getElementById('rs-done').textContent = doneCount;
+                return;
+              }
+              if (!nemHasUsefulLlmText(result)) {
+                validationScore = 0;
+                validationNote = 'Empty response from provider';
+                log('err', `${agent.name}: empty response from provider (attempt ${attempt}/${maxRetries + 1})`);
+                if (attempt <= maxRetries) continue;
+                cardEl.className = 'acard error';
+                document.getElementById('ast-' + agent.id).textContent = 'Empty';
+                document.getElementById('ast-' + agent.id).className = 'acard-st error';
+                agentResults[agent.name] = '[Error: Empty response from provider]';
+                agentScores[agent.name] = { score: 0, note: validationNote, passed: false, attempts: attempt };
                 doneCount++;
                 document.getElementById('rs-done').textContent = doneCount;
                 return;
@@ -17238,7 +17680,7 @@ ${summary}`;
 
         try {
           let _sHeur5 = 0;
-          await streamAPI(
+          const _synthStreamRet = await streamAPI(
             [{ role: 'user', content: prompt1 }],
             _synthSysp,
             (delta, full, tc, usageTok) => {
@@ -17268,6 +17710,7 @@ ${summary}`;
             _synthBudget,
             wf.orchestrator?.synthTemp ?? WS.prefs.orchSynthTemp ?? 0.2
           );
+          if (_synthStreamRet) { _rawOutput = _synthStreamRet; synthesis = _synthStreamRet; }
           log('orch', `Synthesis complete: raw=${_rawOutput.length} chars, stripped=${synthesis.length} chars`);
           // FIX v1.30: update banner to done state
           const _orchBannerDone = document.getElementById('orch-banner');
@@ -17931,6 +18374,10 @@ ${toolList}
 
     function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+    async function fetchProviderOnce(url, opts, signal) {
+      return fetch(url, { ...opts, signal });
+    }
+
     // Retry helper: on 429 wait 5 s then try once more; all other errors throw immediately.
     // signal is passed through so the user can still abort during the wait.
     async function fetchWithRetry429(url, opts, signal) {
@@ -18569,7 +19016,7 @@ ${toolList}
           }
         }
         let _sHeur6 = 0;
-        await streamAPI([{ role: 'user', content: processedInput + ragCtx + directSearchCtx }], directSysPrompt, (delta, full, tc, usageTok) => {
+        const _directStreamRet = await streamAPI([{ role: 'user', content: processedInput + ragCtx + directSearchCtx }], directSysPrompt, (delta, full, tc, usageTok) => {
           if (usageTok) {
             tokens += (usageTok - _sHeur6);
             _sHeur6 = usageTok;
@@ -18587,6 +19034,7 @@ ${toolList}
             }
           }
         }, runAbort?.signal, null, null, WS.prefs.directTemp ?? 0.7);
+        if (_directStreamRet) result = _directStreamRet;
         // Final settled render — streamDone=true runs A2/A3 split
         const { clean: finalClean, thinkContent: finalThink } = processThinkTags(result, 'compose', true);
         bodyEl.innerHTML = mdToHtml(finalClean);
@@ -20217,7 +20665,7 @@ Content: ${context.slice(0, 2500)}`;
       if (!dirHandle) return;
       try {
         let html = '';
-        const folders = ['agents', 'prompts', 'workflows', 'docs', 'results'];
+        const folders = ['agents', 'prompts', 'workflows', 'docs', 'results', 'cache'];
         // Root files
         for await (const [name, handle] of dirHandle) {
           if (handle.kind === 'file' && !folders.includes(name)) {
@@ -20524,6 +20972,15 @@ Content: ${context.slice(0, 2500)}`;
             + _renderMcpOutput(tr.output) + '</div>';
         }).join('') + '</details>';
     }
+    function _renderTaskRetryPanel(id, message) {
+      return '<div style="font-size:12px;background:#fef2f2;border:1px solid rgba(220,38,38,.22);border-radius:var(--r);padding:10px 12px;margin-top:6px;color:var(--t2);word-break:break-word;line-height:1.6">'
+        + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">'
+        + '<span style="font-weight:700;color:#dc2626">Task failed after automatic retries</span>'
+        + '<button class="btn bt btn-sm" onclick="runTask(\'' + escJS(id) + '\')" title="Retry failed task">&#8635; Retry failed task</button>'
+        + '</div>'
+        + '<div style="color:var(--red);white-space:pre-wrap;max-height:220px;overflow-y:auto">' + esc(message || 'Unknown error') + '</div>'
+        + '</div>';
+    }
     function _setTaskCard(id, isRunning) {
       var btn = document.getElementById('task-run-' + id);
       var row = btn ? btn.closest('.task-row') : null;
@@ -20612,6 +21069,9 @@ Content: ${context.slice(0, 2500)}`;
         ) : '';
         const wfOptions = (WS.workflows || []).map(w => '<option value="' + w.id + '">' + esc(w.name) + '</option>').join('');
         const hasResult = lastRun && lastRun.result;
+        const isFailed = !!(lastRun && lastRun.status !== 'success');
+        const runLabel = isFailed ? '&#8635; Retry' : '&#9654; Run';
+        const runTitle = isFailed ? 'Retry failed task' : 'Run task';
         var _sc = lastRun ? (lastRun.status === 'success' ? 'background:#dcfce7;color:#15803d' : 'background:#fee2e2;color:#dc2626') : 'background:var(--bg2);color:var(--t4)';
         var _st = lastRun ? (lastRun.status === 'success' ? '\u2713 OK' : '\u2715 ERR') : 'NEW';
         const _tsel = _selTasks.has(t.id);
@@ -20626,17 +21086,17 @@ Content: ${context.slice(0, 2500)}`;
           + '</div>'
           + '<span class="card-status ' + (lastRun ? (lastRun.status === 'success' ? 'ok' : 'err') : 'new') + '">' + _st + '</span>'
           + '<div class="task-row-actions">'
-          + '<button class="btn bp btn-sm" id="task-run-' + esc(t.id) + '" onclick="runTask(\'' + esc(t.id) + '\')">&#9654; Run</button>'
+          + '<button class="btn ' + (isFailed ? 'bt' : 'bp') + ' btn-sm" id="task-run-' + esc(t.id) + '" onclick="runTask(\'' + escJS(t.id) + '\')" title="' + runTitle + '">' + runLabel + '</button>'
           + (wfOptions ? '<select id="task-wf-' + esc(t.id) + '" style="font-size:11px;padding:3px 6px;border-radius:var(--r);border:1px solid var(--border);background:var(--bg);color:var(--t2);max-width:120px"><option value="">— Workflow —</option>' + wfOptions + '</select><button class="btn bs btn-sm" onclick="runTaskInWorkflow(\'' + esc(t.id) + '\')">&#9654; Run in Workflow</button>' : '')
-          + (hasResult ? '<button class="btn bs btn-sm" onclick="taskResultToLibrary(\'' + esc(t.id) + '\')" title="Save to Library">&#8594; Library</button>' : '')
+          + (hasResult && !isFailed ? '<button class="btn bs btn-sm" onclick="taskResultToLibrary(\'' + esc(t.id) + '\')" title="Save to Library">&#8594; Library</button>' : '')
           + '<button class="btn bt btn-sm" onclick="makeAgentFromTask(\'' + esc(t.id) + '\')" title="Create a reusable MCP agent from this task">&#x2295; Agent</button>'
           + '</div>'
           + '<div id="task-log-' + esc(t.id) + '" class="task-run-log"><button onclick="this.parentNode.style.display=\'none\'" style="float:right;background:none;border:none;cursor:pointer;color:var(--t4);font-size:11px;padding:0 2px;line-height:1" title="Dismiss">&#x2715;</button></div>'
           + '<details id="task-result-' + esc(t.id) + '" data-tid="' + esc(t.id) + '"' + (hasResult ? ((WS.prefs.taskResultOpen || {})[t.id] ? ' open' : '') : ' style="display:none"') + ' ontoggle="_taskToggle(this)">'
           + '<summary style="font-size:12px;cursor:pointer;color:var(--t3);list-style:none;padding:4px 0;display:flex;align-items:center;gap:6px"><span>&#9660; Last result</span><span style="margin-left:auto;font-size:10px;opacity:.6">click to close</span></summary>'
           + '<div id="task-result-inner-' + esc(t.id) + '">'
-          + (hasResult ? '<div style="font-size:12px;background:var(--glt);border:1px solid rgba(22,163,74,.2);border-radius:var(--r);padding:10px 12px;margin-top:6px;color:var(--t2);word-break:break-word;max-height:300px;overflow-y:auto;line-height:1.7">' + mdToHtml(processThinkTags(lastRun.result || '', 'compose').clean) + '</div>' : '')
-          + _renderTaskToolResults(lastRun)
+          + (hasResult ? (isFailed ? _renderTaskRetryPanel(t.id, lastRun.result || '') : '<div style="font-size:12px;background:var(--glt);border:1px solid rgba(22,163,74,.2);border-radius:var(--r);padding:10px 12px;margin-top:6px;color:var(--t2);word-break:break-word;max-height:300px;overflow-y:auto;line-height:1.7">' + mdToHtml(processThinkTags(lastRun.result || '', 'compose').clean) + '</div>') : '')
+          + (!isFailed ? _renderTaskToolResults(lastRun) : '')
           + '</div></details>'
           + (t.runs && t.runs.length > 1 ? runsHtml : '')
           + '</div>';
@@ -20660,7 +21120,13 @@ Content: ${context.slice(0, 2500)}`;
       if (resultEl) { resultEl.style.display = 'block'; resultEl.open = true; resultEl.innerHTML = '<summary style="font-size:12px;color:var(--t3);padding:4px 0">Running…</summary>'; }
 
       if (!_mcpToolsCache || !_mcpToolsCache.length) {
-        try { await mcpGetAllTools(); } catch (e) { notify('Failed to load MCP tools: ' + e.message, 'err'); if (btn) { btn.disabled = false; btn.innerHTML = '&#9654; Run'; } return; }
+        try { await mcpGetAllTools(); } catch (e) {
+          notify('Failed to load MCP tools: ' + e.message, 'err');
+          _setTaskCard(id, false);
+          (function () { var _b = document.getElementById('ni-tasks-badge'); if (_b) _b.remove(); })();
+          if (btn) { btn.disabled = false; btn.innerHTML = '&#9654; Run'; btn.style.opacity = ''; }
+          return;
+        }
       }
 
       const toolDesc = (_mcpToolsCache || []).map(function (entry) {
@@ -20767,7 +21233,7 @@ Content: ${context.slice(0, 2500)}`;
         const re2 = document.getElementById('task-result-' + id);
         const re2i = document.getElementById('task-result-inner-' + id);
         if (re2) { re2.style.display = 'block'; re2.open = true; }
-        if (re2i) { re2i.innerHTML = '<div style="color:var(--red);font-size:12px">Error: ' + esc(e.message) + '</div>'; }
+        if (re2i) { re2i.innerHTML = _renderTaskRetryPanel(id, e.message); }
         notify('Task failed: ' + e.message, 'err');
       }
       if (btn) { btn.disabled = false; btn.innerHTML = '&#9654; Run'; btn.style.opacity = ''; }
