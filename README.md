@@ -105,7 +105,7 @@ Every piece of data — agents, prompts, workflows, skills, tasks, memories, doc
 ## Quick Start
 
 1. **Install the Chrome Extension** — [Download from the Chrome Web Store](https://chromewebstore.google.com/detail/nemilia-%E2%80%94-send-to-workspa/inkhagbajnhcnedmjhppgloeamfmhkfl) (**Mandatory** for web capture and MCP)
-2. **Download** `Nemilia-v2.2.html` from [GitHub](https://github.com/luislopez1212/Nemilia)
+2. **Download** `Nemilia-v2_2.html` from [GitHub](https://github.com/luislopez1212/Nemilia)
 3. **Open** the HTML file in Chrome 121+ or Edge 121+
 4. **Create a profile** — enter a name and password; your workspace is encrypted at rest with AES-256-GCM
 5. **Connect a provider** — click the provider pill in the header, select a provider, paste your API key, and save
@@ -326,6 +326,8 @@ Tasks are autonomous, goal-driven operations that use connected MCP tools to com
 - **AI Generate** — describe the goal in plain language; AI writes a complete task configured for your connected tools
 
 Tasks require at least one connected MCP server and a configured AI provider. The task agent uses the same `TOOL_CALL` format as workflow agents and has access to the full connected tool set.
+
+Transient LLM/provider failures are retried automatically up to 10 total attempts with increasing backoff delays before the run is marked failed. Failed task cards show a **Retry** action in the card and inside the error detail panel so you can rerun manually after fixing a provider, network, or MCP issue.
 
 ---
 
@@ -594,7 +596,7 @@ Tasks require at least one MCP server connected and an AI provider configured.
 5. Click **Save Task**
 6. On the task card, click **Run**
 
-While running the task card shows a pulse-border animation and a live log panel streams each tool call and result. The Tasks nav item shows an "Executing" badge. When the run completes the task card shows the status (OK or ERR), and the result is shown in a collapsible panel.
+While running the task card shows a pulse-border animation and a live log panel streams each tool call and result. The Tasks nav item shows an "Executing" badge. When the run completes the task card shows the status (OK or ERR), and the result is shown in a collapsible panel. If the run fails after automatic retries, click **Retry** on the task card or in the error panel to run it again manually.
 
 **From a completed task you can:**
 - **Run in Workflow** — pick a workflow from the dropdown on the task card and click Run in Workflow to pass the task result as input to a full agent pipeline
@@ -837,10 +839,12 @@ Chrome AI is suitable for direct chat. It does not support the full workflow pip
 ### Tutorial: Connecting a Custom API Provider
 
 1. Open the provider modal and select **Custom API**
-2. Enter the base URL of the endpoint (e.g. `https://your-host.com/v1/chat/completions`)
+2. Enter the full endpoint URL. For OpenAI-compatible Chat Completions use `https://your-host.com/v1/chat/completions`; Nemilia posts to the URL exactly as entered and does not append `/chat/completions` automatically.
 3. Enter a display name and the model ID the endpoint expects
 4. Paste your API key if required
 5. Save
+
+Custom API accepts streaming SSE Chat Completions and non-streaming JSON Chat Completions responses. Endpoints ending in `/responses` or `/response` are sent using a Responses-style payload and parsed from either streaming events or JSON text output. If an endpoint returns no visible text, workflow agents treat it as an error instead of silently passing with empty output.
 
 The endpoint must return `Access-Control-Allow-Origin` CORS headers, or the browser will block requests. For local self-hosted endpoints this is not an issue. For remote endpoints, configure CORS on the server side or use the Nemilia Chrome extension, which relays requests.
 
@@ -855,6 +859,8 @@ The endpoint must return `Access-Control-Allow-Origin` CORS headers, or the brow
 4. Nemilia syncs your workspace to disk on every save
 
 Once connected, workspace files are accessible in any text editor. The storage mode indicator in Settings shows **File System** when active.
+
+When a local folder is connected, successful text LLM provider responses are cached under `cache/<md5>.json`. The MD5 key is generated from the complete provider request information so repeated identical requests return the same cached content. Failed or empty responses are not cached.
 
 **Storage fallback order:**
 1. File System API (Chrome and Edge only) — workspace folder on disk
@@ -924,7 +930,7 @@ Three-tier storage (automatic fallback):
   File System API (Chrome/Edge) → IndexedDB → localStorage
 ```
 
-All workspace data is encrypted per profile before being written to any storage tier. Document chunks and vector embeddings live in IndexedDB. When a File System folder is connected the workspace is additionally synced to disk on every save.
+All workspace data is encrypted per profile before being written to any storage tier. Document chunks and vector embeddings live in IndexedDB. When a File System folder is connected the workspace is additionally synced to disk on every save, and successful text LLM responses are cached as one JSON file per request key in the `cache/` directory.
 
 ---
 
@@ -933,10 +939,11 @@ All workspace data is encrypted per profile before being written to any storage 
 - Workspace encrypted at rest: AES-256-GCM, key derived via PBKDF2 (200,000 SHA-256 iterations) from your profile password
 - MCP auth tokens stored in IndexedDB only — never serialized to `localStorage`
 - API keys stored per-profile in a scoped key store — inaccessible to other profiles
+- LLM response cache files store the response content and provider/model metadata only; request bodies, prompts, and API keys are not written into cache files
 - On logout, all in-memory workspace data is explicitly zeroed before the login overlay appears
 - DOMPurify 3.1.5 sanitizes all HTML rendered from workflow and agent output
 - Zero telemetry — no analytics, no tracking, no beacons
-- CSP `connect-src` locked to an explicit allowlist of known provider endpoints
+- CSP blocks object/embed and form submission surfaces; `connect-src` remains broad so user-configured providers, local model servers, and MCP endpoints can work from a local file
 
 **What leaves your browser** (only when you explicitly initiate it):
 - LLM API calls to your configured provider
@@ -968,6 +975,7 @@ WebLLM requires Chrome 121+ or Edge 121+ with hardware acceleration enabled. Chr
 | Max output tokens | 32,768 | Upper ceiling for model responses |
 | Temperature | 0.7 | Global default (0.0–1.0) |
 | Max retries | 3 | Auto-retry attempts per agent on validation failure |
+| LLM failure retry cap | 10 attempts | Transient provider/network failures retry with increasing waits up to 60s; invalid keys, billing errors, model/config errors, CORS setup failures, and user stops do not retry |
 | DAG stagger delay | 600 ms | Delay between parallel agent launches within the same stage |
 | RAG chunk depth (TopK) | 10 | Chunks retrieved per query; increase for large codebases |
 | Captures preview length | 400 chars | Characters shown in the expanded capture card preview |
