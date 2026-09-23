@@ -1,5 +1,5 @@
 Nemilia v2.3 — Product Roadmap
-
+*** just a heads-up, I've been waiting on WebMCP development to settle down a bit as it's been a moving target, and I'd like to include it in the next release *** 
 
 Agents Can Now Use Your Tools
 Agents in Workflow Builder can autonomously call MCP tools during execution — searching, fetching, writing, querying — without you wiring each step manually. You describe the goal; the agent decides which tools to invoke and when.
