@@ -105,7 +105,7 @@ Every piece of data — agents, prompts, workflows, skills, tasks, memories, doc
 ## Quick Start
 
 1. **Install the Chrome Extension** — [Download from the Chrome Web Store](https://chromewebstore.google.com/detail/nemilia-%E2%80%94-send-to-workspa/inkhagbajnhcnedmjhppgloeamfmhkfl) (**Mandatory** for web capture and MCP)
-2. **Download** `Nemilia-v2.2.html` from [GitHub](https://github.com/luislopez1212/Nemilia)
+2. **Download** `Nemilia-v2_2.html` from [GitHub](https://github.com/luislopez1212/Nemilia)
 3. **Open** the HTML file in Chrome 121+ or Edge 121+
 4. **Create a profile** — enter a name and password; your workspace is encrypted at rest with AES-256-GCM
 5. **Connect a provider** — click the provider pill in the header, select a provider, paste your API key, and save
